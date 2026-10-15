@@ -1,0 +1,15 @@
+{
+  "OpenProjectRoot": "/opt/openproject",
+  "Distro": "Debian",
+  "LinuxUser": "openproject",
+  "Url": "http://localhost:3000",
+  "StartWithWindows": false,
+  "AutoStartOpenProject": false,
+  "OpenBrowserOnStart": true,
+  "ColdReadyTimeoutSec": 180,
+  "WarmReadyTimeoutSec": 90,
+  "PrepareTimeoutSec": 300,
+  "WslWakeTimeoutSec": 60,
+  "WslCommandTimeoutSec": 120,
+  "StreamDockPluginsPath": ""
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Stream Deck Plugin Development"
+  short_description: "Build and test Stream Deck and StreamDock plugins"
+  default_prompt: "Use $stream-deck-plugin-development to implement or review this plugin for the specified Stream Deck or StreamDock host."

@@ -1,0 +1,15 @@
+{
+  "Name": "OpenProject", "Author": "OpenProject Tray", "Version": "1.1.0",
+  "Description": "Запуск OpenProject, миграция и перезапуск с индикатором состояния.",
+  "SDKVersion": 2, "CodePathWin": "bin/OpenProjectPlugin.exe",
+  "Icon": "static/icon", "Category": "OpenProject", "CategoryIcon": "static/icon",
+  "OS": [{"Platform": "windows", "MinimumVersion": "10"}],
+  "Software": {"MinimumVersion": "2.10.179.426"},
+  "Actions": [{
+    "UUID": "com.openproject.tray.activate", "Name": "OpenProject",
+    "Tooltip": "Остановлен: запуск. Работает: миграция и перезапуск.",
+    "Icon": "static/icon", "States": [{"Image": "static/icon"}],
+    "Controllers": ["Keypad"], "UserTitleEnabled": false,
+    "SupportedInMultiActions": false, "PropertyInspectorPath": "static/property_inspector.html"
+  }]
+}

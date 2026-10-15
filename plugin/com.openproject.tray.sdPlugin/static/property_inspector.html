@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OpenProject</title>
+<style>
+body{margin:0;padding:18px;color:#eee;background:#252525;font:13px system-ui,sans-serif}h1{font-size:16px;margin:0 0 18px}label{display:block;margin:18px 0 8px}input[type=range]{width:100%;accent-color:#3599ed}input[type=text]{box-sizing:border-box;width:100%;padding:8px;border:1px solid #666;border-radius:5px;background:#333;color:#fff}output{float:right;font-variant-numeric:tabular-nums}button{margin-top:18px;padding:8px 12px;background:#3e3e3e;border:1px solid #777;border-radius:5px;color:#fff;cursor:pointer}button:hover{background:#505050}input:focus-visible,button:focus-visible{outline:2px solid #70b8ff;outline-offset:3px}p{line-height:1.5;color:#bbb}.status{color:#e5be61}
+select{box-sizing:border-box;width:100%;padding:9px;background:#333;color:#eee;border:1px solid #666;border-radius:6px}select:focus-visible{outline:2px solid #70b8ff;outline-offset:3px}
+.preview{position:relative;width:108px;height:108px;margin:12px auto 8px;background:#191b20;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px #0006}.logo{position:absolute;display:grid;place-items:center;left:50%;top:50%;transform:translate(-50%,-50%);background:#1c6da2;color:white;font:bold 32px 'Segoe UI',sans-serif;overflow:hidden}.logo.tile{background:linear-gradient(135deg,#36a6ec,#0f3c91);box-shadow:inset 0 1px 0 #ffffff55}.logo.minimal{background:#232a35;color:#5cc0ff}.logo.orbit{background:#11233d;font-size:26px}.logo.orbit:after{content:'';position:absolute;inset:10%;border:3px solid #287ead;border-top-color:#5bd8ff;border-radius:50%;animation:orbit 3s linear infinite}.marker{position:absolute;background:#969696;border:1.5px solid #14161a;border-radius:50%;box-sizing:border-box}.caption{text-align:center;font-size:11px;color:#aaa;margin-top:0}@keyframes orbit{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.logo.orbit:after{animation:none}}
+</style></head><body>
+<h1>OpenProject</h1>
+<div class="preview" aria-hidden="true"><div id="previewLogo" class="logo">OP</div><div id="previewMarker" class="marker"></div></div>
+<p class="caption">Предпросмотр оформления</p>
+<label for="iconStyle">Иконка</label>
+<select id="iconStyle"><option value="classic">Классическая</option><option value="tile">Объёмная плитка</option><option value="minimal">Минималистичная</option><option value="orbit">Орбита · анимация</option></select>
+<label for="logo">Размер логотипа <output id="logoValue">85%</output></label>
+<input id="logo" type="range" min="30" max="100" step="1" value="85">
+<label for="marker">Размер индикатора <output id="markerValue">20%</output></label>
+<input id="marker" type="range" min="8" max="35" step="1" value="20">
+<label for="position">Положение индикатора</label>
+<select id="position"><option value="top-left">Сверху слева</option><option value="top-right">Сверху справа</option><option value="bottom-left">Снизу слева</option><option value="bottom-right" selected>Снизу справа</option></select>
+<label for="glow">Свечение индикатора <output id="glowValue">0%</output></label>
+<input id="glow" type="range" min="0" max="100" step="1" value="0">
+<label for="radius">Закругление логотипа <output id="radiusValue">0%</output></label>
+<input id="radius" type="range" min="0" max="50" step="1" value="0">
+<button id="reset" type="button">Сбросить размеры</button>
+<label for="exe">Путь к OpenProjectTray.exe</label>
+<input id="exe" type="text" placeholder="Автоматически — путь из установки" spellcheck="false">
+<p>Пустое поле использует путь, сохранённый при установке плагина. Размеры применяются только к этой кнопке.</p>
+<p>Чёрный — приложение закрыто, нажатие открывает его. Серый — запуск OpenProject. Зелёный — миграция и перезапуск. Жёлтый — операция выполняется. Красный — ошибка.</p>
+<p id="connection" class="status" role="status">Подключение к StreamDock…</p>
+<script src="inspector.js"></script></body></html>

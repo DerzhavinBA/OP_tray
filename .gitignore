@@ -1,0 +1,17 @@
+# Local settings (paths, preferences)
+settings.json
+
+# Build / release artifacts
+dist/
+build/obj/
+*.exe
+*.dll
+
+# Logs and local test artifacts
+logs/
+*.log
+*-report.txt
+*-err.txt
+check-start.txt
+smoke-console.txt
+op-tray-start-dumped.txt
