@@ -1,6 +1,6 @@
 # OpenProject Tray
 
-Приложение Windows в системном трее для управления dev-установкой OpenProject в WSL (`bin/dev`). Сам OpenProject, WSL и PostgreSQL должны быть уже настроены.
+Приложение Windows в системном трее для управления пакетной установкой OpenProject в WSL через systemd. OpenProject, systemd, веб-прокси и PostgreSQL должны быть уже настроены. Проверено с пакетом OpenProject 17.9.2 в Debian. Установка для разработки не поддерживается.
 
 ## Быстрый запуск
 
@@ -16,7 +16,7 @@
 |---|---|---|
 | Приложение закрыто (StreamDock) | Чёрный с контрастной обводкой | Открыть только приложение; следующее нажатие управляет OpenProject |
 | Остановлен | Серый | Запуск OpenProject |
-| Работает | Зелёный | Остановка → `bundle install` → `db:migrate` → запуск |
+| Работает | Зелёный | Остановка → миграции через пакетный CLI → запуск |
 | Операция выполняется | Жёлтый | Повторное нажатие игнорируется |
 | Ошибка | Красный | Повторная попытка после проверки состояния |
 
@@ -57,7 +57,7 @@
 
 Доступны **Старт**, **Перезапуск**, **Перезапуск + migrate**, **Стоп**, открытие браузера и терминала, проверка окружения, подсчёт ожидающих миграций, просмотр журналов, настройки и установка плагина. Двойной клик по значку трея открывает браузер.
 
-Стоп завершает только dev-стек; WSL и PostgreSQL остаются запущенными. Рабочие операции выполняются в фоне.
+Стоп останавливает только службы пакета `openproject*.service`; WSL, PostgreSQL и веб-прокси остаются запущенными. Миграции выполняются штатной командой `/usr/bin/openproject run bundle exec rails db:migrate` от пользователя OpenProject. При ошибке миграции службы остаются остановленными, индикатор становится красным. Рабочие операции выполняются в фоне.
 
 ## Настройки и журналы
 
@@ -68,7 +68,7 @@
 | `OpenProjectRoot` | `/opt/openproject` |
 | `Distro` | `Debian` |
 | `LinuxUser` | `openproject` |
-| `Url` | `http://localhost:3000` |
+| `Url` | `http://127.0.0.1` |
 | `StartWithWindows` | `false` |
 | `AutoStartOpenProject` | `false` |
 | `OpenBrowserOnStart` | `true` |
@@ -82,9 +82,12 @@
 - Приложение: `logs/tray-activity.log`.
 - Ошибки запуска контроллера: `logs/tray-startup-error.log`.
 - Плагин: `%LOCALAPPDATA%\OpenProjectTray\streamdock.log`.
-- WSL: `$OpenProjectRoot/log/tray-dev.log` и `tray-prepare.log`.
+- Службы: `journalctl -u 'openproject*.service'`; доступны хвост, блокнот и наблюдение из меню.
+- Операции служб: `$OpenProjectRoot/log/tray-service.log`; миграции: `$OpenProjectRoot/log/tray-prepare.log`.
 
-Трей определяет доступность через настроенный TCP-порт; готовность после запуска дополнительно проверяется HTTP-запросом. Это сохраняет существующую модель проверки, а не идентифицирует произвольный процесс на порту.
+Трей проверяет активность экземпляров web/worker и HTTP-ответ страницы входа. Открытый порт прокси или активная родительская служба сами по себе не означают готовность. Проверки WSL выполняются в фоне; интерфейс и плагин читают кеш. Мониторинг не пробуждает остановленный дистрибутив.
+
+Старые стандартные адреса `http://localhost:3000` и `http://localhost` автоматически меняются на `http://127.0.0.1` только после подтверждения пакетной установки. Исходные настройки сохраняются рядом в `settings.json.before-package-*.bak`. Пользовательские адреса, HTTPS и префиксы пути сохраняются.
 
 ## Сборка
 
@@ -113,6 +116,7 @@ Uninstall.exe /uninstall /S
 ## Безопасные автоматические проверки
 
 ```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-PackageCore.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Desktop.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-TrayIntegration.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-PluginDialog.ps1
@@ -124,3 +128,11 @@ node .\tests\Test-PluginProtocol.js
 Проверки используют отдельные папки в `build/obj`, приватные тестовые каналы, подменённые операции WSL и эмулятор StreamDock. Тесты Named Pipe могут требовать обычного запуска вне ограниченной песочницы. Для двух JavaScript-тестов нужен Node.js; приложение и плагин от него не зависят.
 
 Старый `Test-Tray.ps1` — **живая интеграционная проверка**: меняет настройки и запускает/останавливает настоящий стек. Не входит в безопасный набор. Проверку настоящей миграции и физической кнопки выполняйте отдельно в своей среде.
+
+Проверка оболочки с подменёнными службами и CLI (не меняет OpenProject):
+
+```powershell
+wsl -d Debian -- bash /mnt/c/Users/Boris/Desktop/OpenProjectTray/tests/Test-PackageScripts.sh
+```
+
+Перед живой проверкой миграций создайте резервную копию базы штатными средствами PostgreSQL. Физическую кнопку StreamDock нужно проверить нажатием на устройстве.

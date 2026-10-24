@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
@@ -25,7 +25,7 @@ Add-Type -Path $shared
 $bitmap = [OpenProjectTray.ButtonRenderer]::LoadLogo((Join-Path $root 'OpenProject.ico'))
 $bitmap.Save((Join-Path $plugin 'static/icon.png'), [System.Drawing.Imaging.ImageFormat]::Png)
 $bitmap.Dispose()
-$runtimeFiles = @('OpenProject-Tray.ps1','OpenProject-Tray.Core.ps1','OpenProject-Tray.Desktop.ps1','OpenProject.ico','op-tray-start.sh','op-tray-stop.sh','op-tray-prepare.sh','op-tray-doctor.sh','settings.example.json','README.md')
+$runtimeFiles = @('OpenProject-Tray.ps1','OpenProject-Tray.Core.ps1','OpenProject-Tray.Desktop.ps1','OpenProject.ico','op-tray-package.sh','op-tray-start.sh','op-tray-stop.sh','op-tray-prepare.sh','op-tray-doctor.sh','settings.example.json','README.md')
 foreach ($file in $runtimeFiles) {
     Copy-Item -LiteralPath (Join-Path $root $file) -Destination $portable -Force
 }

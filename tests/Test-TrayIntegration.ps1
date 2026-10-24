@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 # Runs the real UI and launcher against a private pipe and a fake core. Never calls WSL.
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
@@ -16,7 +16,17 @@ Copy-Item -LiteralPath (Join-Path $sandbox 'OpenProjectTray.Shared.dll') -Destin
 $fake = @'
 function Test-OpenProjectQuick { return (Test-Path (Join-Path $script:OpTrayDir 'running')) }
 function Test-OpenProjectRunning { return (Test-OpenProjectQuick) }
+function Update-OpPackagedSettings { $false }
+function Test-WslDistroRunning { $true }
+function Get-OpPackageHealth {
+    $running = Test-OpenProjectQuick
+    return @{State=$(if ($running) {'Running'} else {'Stopped'}); ActiveServices=$running; Error=''}
+}
 function Invoke-WslProcess { throw 'TEST FAILURE: real WSL path called' }
+function Stop-OpenProjectService {
+    [IO.File]::AppendAllText((Join-Path $script:OpTrayDir 'operations'), "stop`n")
+    Remove-Item -LiteralPath (Join-Path $script:OpTrayDir 'running') -ErrorAction SilentlyContinue
+}
 function Open-OpenProjectBrowser { }
 function Start-OpenProjectPipeline {
     param([switch]$OpenBrowserWhenReady)
@@ -41,6 +51,15 @@ function Show-Balloon { param($Title,$Text,$Icon) }
 $testExit = New-Object Windows.Forms.Timer
 $testExit.Interval = 100
 $testExit.Add_Tick({ if (Test-Path (Join-Path $script:TrayDir 'exit')) { $testExit.Stop(); Stop-TrayApplication } })
+$testExit.Add_Tick({
+    $command = Join-Path $script:TrayDir 'pending-menu'
+    if (Test-Path $command) {
+        Remove-Item -LiteralPath $command
+        $script:OpHealthValid = $false
+        Invoke-OpActivate
+        Invoke-UiStop
+    }
+})
 $testExit.Start()
 '@
 $tray = $tray.Replace('[System.Windows.Forms.Application]::Run($script:HiddenForm)', ($hook + "`r`n[System.Windows.Forms.Application]::Run(`$script:HiddenForm)"))
@@ -97,6 +116,13 @@ try {
     $null = Wait-State 'Running'
     if ((Get-Content (Join-Path $sandbox 'operations') | Select-Object -Last 1) -ne 'restart-migrate') { throw 'Running stack was not recognized after tray restart' }
     Write-Host 'PASS closed tray recognizes running stack'
+    $operationCount = @(Get-Content (Join-Path $sandbox 'operations')).Count
+    [IO.File]::WriteAllText((Join-Path $sandbox 'pending-menu'), 'yes')
+    Start-Sleep -Seconds 3
+    $null = Wait-State 'Stopped'
+    $operations = @(Get-Content (Join-Path $sandbox 'operations'))
+    if ($operations.Count -ne $operationCount + 1 -or $operations[-1] -ne 'stop') { throw 'Queued activation replayed after explicit menu stop' }
+    Write-Host 'PASS explicit menu stop cancels queued activation'
     Write-Host "Integration sandbox: $sandbox"
 } finally {
     [IO.File]::WriteAllText((Join-Path $sandbox 'exit'),'yes')

@@ -3,14 +3,76 @@ Add-Type -Path (Join-Path $script:TrayDir 'OpenProjectTray.Shared.dll')
 
 function Publish-OpDesktopStatus {
     if ($script:DesktopBridge) {
-        $script:DesktopBridge.Publish($script:TrayState, $script:Busy, [string]$script:BgActionName, [string]$script:LastErrorTip)
+        $script:DesktopBridge.Publish($script:TrayState, ($script:Busy -or $script:ActivationPending), [string]$script:BgActionName, [string]$script:LastErrorTip)
     }
 }
 
 function Invoke-OpActivate {
     if ($script:Busy) { return }
-    $action = [OpenProjectTray.ActivationPolicy]::Action((Test-OpenProjectQuick), $false)
+    if (-not $script:OpHealthValid) {
+        $script:ActivationPending = $true
+        Start-OpStatusRefresh
+        return
+    }
+    $action = [OpenProjectTray.ActivationPolicy]::Action(([bool]$script:OpHealthCache.ActiveServices), $false)
     if ($action -eq 'restart-migrate') { Invoke-UiRestartMigrate } else { Invoke-UiStart }
+}
+
+function Start-OpStatusRefresh {
+    if ($script:Busy -or $script:HealthHandle) { return }
+    $script:HealthGeneration = $script:StatusGeneration
+    $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $rs.Open()
+    $ps = [PowerShell]::Create()
+    $ps.Runspace = $rs
+    [void]$ps.AddScript({
+        param($TrayDir)
+        try {
+            . (Join-Path $TrayDir 'OpenProject-Tray.Core.ps1')
+            Initialize-OpenProjectTrayCore -TrayDir $TrayDir
+            if (Test-WslDistroRunning) { $null = Update-OpPackagedSettings }
+            $health = Get-OpPackageHealth
+            Write-Output -NoEnumerate @{Health=$health; Settings=$script:OpSettings}
+        } catch {
+            Write-Output -NoEnumerate @{Health=@{State='Error'; ActiveServices=$false; Error=$_.Exception.Message}}
+        }
+    }).AddArgument($script:TrayDir)
+    $script:HealthPowerShell = $ps
+    $script:HealthHandle = $ps.BeginInvoke()
+    if (-not $script:HealthTimer) {
+        $script:HealthTimer = New-Object System.Windows.Forms.Timer
+        $script:HealthTimer.Interval = 200
+        $script:HealthTimer.Add_Tick({
+            if (-not $script:HealthHandle -or -not $script:HealthHandle.IsCompleted) { return }
+            $ps = $script:HealthPowerShell
+            $rs = $ps.Runspace
+            try {
+                $result = Get-BgOpResult ($ps.EndInvoke($script:HealthHandle))
+                if (-not $script:Busy -and $script:HealthGeneration -eq $script:StatusGeneration) {
+                    if ($result.Settings) { Initialize-OpenProjectTrayCore -TrayDir $script:TrayDir -Settings $result.Settings }
+                    $script:OpHealthCache = $result.Health
+                    $script:OpHealthValid = $true
+                    Update-TrayStatus -CachedOnly
+                }
+            } finally {
+                $ps.Dispose(); $rs.Dispose()
+                $script:HealthHandle = $null
+                $script:HealthPowerShell = $null
+                $script:HealthTimer.Stop()
+            }
+            if ($script:OpHealthValid -and -not $script:Busy) {
+                if ($script:ActivationPending) {
+                    $script:ActivationPending = $false
+                    Invoke-OpActivate
+                } elseif ($script:StartupPending) {
+                    $script:StartupPending = $false
+                    if ($script:OpHealthCache.State -ne 'Running') { Invoke-UiStart }
+                }
+            } elseif (-not $script:Busy) { Start-OpStatusRefresh }
+            Publish-OpDesktopStatus
+        })
+    }
+    $script:HealthTimer.Start()
 }
 
 function Start-OpDesktopBridge {

@@ -5,7 +5,9 @@ const assert=require('node:assert/strict');
 const root=path.resolve(__dirname,'..');
 const sandbox=path.join(root,'build/obj/protocol-'+crypto.randomUUID());
 const plugin=path.join(sandbox,'plugin');
-fs.cpSync(path.join(root,'dist/OpenProjectTray-portable/plugin/com.openproject.tray.sdPlugin'),plugin,{recursive:true});
+// Optional package path verifies an already installed plugin in the same isolated fixture.
+const packageSource=process.argv[2]||path.join(root,'dist/OpenProjectTray-portable/plugin/com.openproject.tray.sdPlugin');
+fs.cpSync(packageSource,plugin,{recursive:true});
 const bridge=fs.readFileSync(path.join(root,'src/Bridge.cs'),'utf8').replace('"OpenProjectTray." + WindowsIdentity.GetCurrent().User.Value',JSON.stringify('OpenProjectTray.Test.'+crypto.randomUUID()));
 fs.writeFileSync(path.join(sandbox,'Bridge.cs'),bridge);
 fs.writeFileSync(path.join(plugin,'connection.json'),JSON.stringify({exePath:path.join(sandbox,'MockLauncher.exe')}));

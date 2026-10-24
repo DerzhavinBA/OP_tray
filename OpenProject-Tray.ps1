@@ -681,7 +681,10 @@ function Set-MenuBusyState {
 }
 
 function Update-TrayStatus {
+    param([switch]$CachedOnly)
     if ($script:Busy) { return }
+    if (-not $CachedOnly) { Start-OpStatusRefresh }
+    if (-not $script:OpHealthValid) { return }
     $running = $false
     try { $running = Test-OpenProjectQuick } catch { $running = $false }
 
@@ -691,10 +694,11 @@ function Update-TrayStatus {
         $script:MenuStart.Enabled = $false
         $script:MenuStop.Enabled = $true
         $script:Timer.Interval = 10000
-    } elseif ($script:TrayState -eq 'Error' -and $script:LastErrorTip) {
+    } elseif ($script:OpHealthCache.State -eq 'Error' -or ($script:TrayState -eq 'Error' -and $script:LastErrorTip)) {
+        if ($script:OpHealthCache.Error) { $script:LastErrorTip = 'OpenProject: ' + $script:OpHealthCache.Error }
         Set-TrayVisualState -State 'Error' -Tip $script:LastErrorTip
         $script:MenuStart.Enabled = $true
-        $script:MenuStop.Enabled = $false
+        $script:MenuStop.Enabled = [bool]$script:OpHealthCache.ActiveServices
         $script:Timer.Interval = 5000
     } else {
         Set-TrayVisualState -State 'Stopped'
@@ -870,7 +874,7 @@ function Complete-BackgroundOp {
         try { if ($Ps.Runspace) { $Ps.Runspace.Dispose() } } catch { }
         $script:Busy = $false
         $script:BusyStartedAt = $null
-        # Always refresh from TCP so Error recovers when stack is up / Stop shows Stopped.
+        $script:OpHealthValid = $false
         Update-TrayStatus
     }
 }
@@ -888,6 +892,10 @@ function Start-BackgroundOp {
     $label = Get-ActionLogLabel -ActionName $ActionName
     Write-OpActivityLog -Message "${label}: начато"
 
+    $script:ActivationPending = $false
+    $script:StartupPending = $false
+    $script:StatusGeneration++
+    $script:OpHealthValid = $false
     $script:Busy = $true
     $script:BusyStartedAt = Get-Date
     if ($ActionName -in @('start', 'restart', 'restart-migrate')) {
@@ -920,7 +928,7 @@ function Start-BackgroundOp {
                     else { $out = Start-OpenProjectPipeline }
                 }
                 'stop' {
-                    Stop-OpenProjectDevStack
+                    Stop-OpenProjectService
                     Start-Sleep -Seconds 1
                     $out = @{ Mode = 'Stop'; Ready = $true }
                 }
@@ -978,7 +986,7 @@ function Start-BackgroundOp {
 }
 
 function Invoke-UiStart {
-    Show-Balloon 'OpenProject' 'Запуск в фоне (WSL + Postgres + bin/dev)...'
+    Show-Balloon 'OpenProject' 'Запуск служб OpenProject в фоне...'
     Start-BackgroundOp -ActionName 'start' -BusyText 'OpenProject: Starting...'
 }
 
@@ -993,7 +1001,7 @@ function Invoke-UiRestart {
 }
 
 function Invoke-UiRestartMigrate {
-    Show-Balloon 'OpenProject' 'Migrate + перезапуск (bundle install, db:migrate)...'
+    Show-Balloon 'OpenProject' 'Миграции пакета и перезапуск служб...'
     Start-BackgroundOp -ActionName 'restart-migrate' -BusyText 'OpenProject: migrate...'
 }
 
@@ -1110,7 +1118,10 @@ function Show-SettingsDialog {
             Assert-OpSettingsValid -Settings $next
             Set-OpWindowsStartup -TrayDir $script:TrayDir -Enabled ([bool]$script:SettingsChkWin.Checked)
             $saved = Write-OpSettings -TrayDir $script:TrayDir -Settings $next
+            $script:StatusGeneration++
+            $script:OpHealthValid = $false
             Initialize-OpenProjectTrayCore -TrayDir $script:TrayDir -Settings $saved
+            Update-TrayStatus
             Write-OpActivityLog -Message 'Настройки сохранены'
             $script:SettingsForm.DialogResult = [System.Windows.Forms.DialogResult]::OK
             $script:SettingsForm.Close()
@@ -1221,6 +1232,11 @@ function Show-WslLogTailDialog {
 }
 
 function Stop-TrayApplication {
+    if ($script:HealthTimer) { $script:HealthTimer.Stop(); $script:HealthTimer.Dispose() }
+    if ($script:HealthPowerShell) {
+        $rs = $script:HealthPowerShell.Runspace
+        $script:HealthPowerShell.Stop(); $script:HealthPowerShell.Dispose(); $rs.Dispose()
+    }
     if ($script:DesktopTimer) { $script:DesktopTimer.Stop(); $script:DesktopTimer.Dispose() }
     if ($script:DesktopBridge) { $script:DesktopBridge.Dispose(); $script:DesktopBridge = $null }
     Write-OpActivityLog -Message 'Трей: выход'
@@ -1312,9 +1328,9 @@ $script:MenuSettings = New-Object System.Windows.Forms.ToolStripMenuItem 'Нас
 $menuExit = New-Object System.Windows.Forms.ToolStripMenuItem 'Выход'
 
 $menuLogActivity = New-Object System.Windows.Forms.ToolStripMenuItem 'Журнал трея…'
-$menuLogDev = New-Object System.Windows.Forms.ToolStripMenuItem 'tray-dev.log — хвост'
-$menuLogDevNotepad = New-Object System.Windows.Forms.ToolStripMenuItem 'tray-dev.log — блокнот'
-$menuLogDevFollow = New-Object System.Windows.Forms.ToolStripMenuItem 'Следить tray-dev.log'
+$menuLogDev = New-Object System.Windows.Forms.ToolStripMenuItem 'Службы OpenProject — журнал'
+$menuLogDevNotepad = New-Object System.Windows.Forms.ToolStripMenuItem 'Службы OpenProject — блокнот'
+$menuLogDevFollow = New-Object System.Windows.Forms.ToolStripMenuItem 'Следить за службами OpenProject'
 $menuLogPrep = New-Object System.Windows.Forms.ToolStripMenuItem 'tray-prepare.log — хвост'
 $menuLogPrepNotepad = New-Object System.Windows.Forms.ToolStripMenuItem 'tray-prepare.log — блокнот'
 $script:MenuLogs.DropDown.Font = (Get-OpUiTheme).FontUi
@@ -1380,7 +1396,7 @@ $menuLogActivity.Add_Click({
     }
 })
 $menuLogDev.Add_Click({
-    Show-WslLogTailDialog -Title 'tray-dev.log' -LinuxPath (Get-OpDevLogHint)
+    Show-WslLogTailDialog -Title 'Журнал служб OpenProject' -LinuxPath (Get-OpDevLogHint)
 })
 $menuLogDevNotepad.Add_Click({
     try {
@@ -1438,7 +1454,10 @@ if ((-not $Background) -or ($Startup -and $script:OpAutoStartOpenProject)) {
     $script:AutoStartTimer.Add_Tick({
         $script:AutoStartTimer.Stop()
         $script:AutoStartTimer.Dispose()
-        if ($Startup) { if (-not (Test-OpenProjectQuick)) { Invoke-UiStart } }
+        if ($Startup) {
+            if ($script:OpHealthValid) { if (-not (Test-OpenProjectQuick)) { Invoke-UiStart } }
+            else { $script:StartupPending = $true; Start-OpStatusRefresh }
+        }
         else { Invoke-OpActivate }
     })
     $script:AutoStartTimer.Start()

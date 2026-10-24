@@ -54,7 +54,7 @@ try {
         OpenProjectRoot      = '/opt/openproject'
         Distro               = 'Debian'
         LinuxUser            = 'openproject'
-        Url                  = 'http://localhost:3000'
+        Url                  = 'http://127.0.0.1'
         StartWithWindows     = $false
         AutoStartOpenProject = $false
         OpenBrowserOnStart   = $true
@@ -74,7 +74,7 @@ try {
     Assert-True 'Activity log has timestamps' ($logText -match '\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}:\d{2}')
     Initialize-OpenProjectTrayCore -TrayDir $TrayDir
     Assert-True 'Init sets OpRoot' ($script:OpRoot -eq '/opt/openproject')
-    Assert-True 'Init sets OpHttpPort' ($script:OpHttpPort -eq 3000)
+    Assert-True 'Init sets OpHttpPort' ($script:OpHttpPort -eq 80)
     Assert-True 'Init AutoStartOpenProject false' (-not $script:OpAutoStartOpenProject)
 } finally {
     if ($hadSettings -and $null -ne $backup) {
@@ -127,11 +127,11 @@ try {
 # 4) Stop then Start pipeline
 Write-Host "`n-- Stop / Start / Fast / Duplicate --"
 try {
-    Stop-OpenProjectDevStack
+    Stop-OpenProjectService
     Start-Sleep -Seconds 3
-    Assert-True 'Stop leaves :3000 down' (-not (Test-OpenProjectRunning))
+    Assert-True 'Stop leaves package services down' (-not (Test-OpenProjectRunning))
 } catch {
-    Assert-True 'Stop-OpenProjectDevStack' $false $_.Exception.Message
+    Assert-True 'Stop-OpenProjectService' $false $_.Exception.Message
 }
 
 try {
@@ -145,11 +145,9 @@ try {
 }
 
 try {
-    $before = Get-OpenProjectProcManagerCount
     $r2 = Start-OpenProjectPipeline
-    $after = Get-OpenProjectProcManagerCount
     Assert-True 'Second Start is Fast path' ($r2.Mode -eq 'Fast' -and -not $r2.FullStart)
-    Assert-True 'No duplicate proc managers' ($after -le $before -or $after -eq 1)
+    Assert-True 'Services remain healthy after duplicate start' ((Get-OpPackageHealth).State -eq 'Running')
 } catch {
     Assert-True 'Fast path / no duplicate' $false $_.Exception.Message
 }

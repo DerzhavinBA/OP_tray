@@ -2,7 +2,7 @@
   "OpenProjectRoot": "/opt/openproject",
   "Distro": "Debian",
   "LinuxUser": "openproject",
-  "Url": "http://localhost:3000",
+  "Url": "http://127.0.0.1",
   "StartWithWindows": false,
   "AutoStartOpenProject": false,
   "OpenBrowserOnStart": true,

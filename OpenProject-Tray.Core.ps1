@@ -16,7 +16,7 @@ function Get-OpSettingsDefaults {
         OpenProjectRoot      = '/opt/openproject'
         Distro               = 'Debian'
         LinuxUser            = 'openproject'
-        Url                  = 'http://localhost:3000'
+        Url                  = 'http://127.0.0.1'
         StartWithWindows     = $false
         AutoStartOpenProject = $false
         OpenBrowserOnStart   = $true
@@ -295,7 +295,7 @@ function Get-OpUrlParts {
         }
         return @{ Host = $hostName; Port = $port }
     } catch {
-        return @{ Host = '127.0.0.1'; Port = 3000 }
+        return @{ Host = '127.0.0.1'; Port = 80 }
     }
 }
 
@@ -364,8 +364,12 @@ function Initialize-OpenProjectTrayCore {
     $parts = Get-OpUrlParts -Url $script:OpUrl
     $script:OpHttpHost = $parts.Host
     $script:OpHttpPort = [int]$parts.Port
-    $loginHost = if ($script:OpHttpHost -eq 'localhost') { '127.0.0.1' } else { $script:OpHttpHost }
-    $script:OpLoginUrl = "http://${loginHost}:$($script:OpHttpPort)/login"
+    # WSL forwarding may listen only on IPv4. HTTPS must retain its certificate hostname.
+    $loginHost = if ($script:OpHttpHost -eq 'localhost' -and ([Uri]$script:OpUrl).Scheme -eq 'http') { '127.0.0.1' } else { $script:OpHttpHost }
+    $login = [UriBuilder]([Uri]$script:OpUrl)
+    $login.Host = $loginHost
+    $login.Path = $login.Path.TrimEnd('/') + '/login'
+    $script:OpLoginUrl = $login.Uri.AbsoluteUri
     $script:OpColdReadyTimeoutSec = [int]$Settings.ColdReadyTimeoutSec
     $script:OpWarmReadyTimeoutSec = [int]$Settings.WarmReadyTimeoutSec
     $script:OpPrepareTimeoutSec = [int]$Settings.PrepareTimeoutSec
@@ -382,7 +386,7 @@ function Initialize-OpenProjectTrayCore {
 }
 
 function Get-OpDevLogHint {
-    return "$($script:OpRoot)/log/tray-dev.log"
+    return 'journal:openproject'
 }
 
 function Get-OpPrepareLogHint {
@@ -400,7 +404,7 @@ function Test-OpTcpPortOpen {
         if ($HostName -eq 'localhost') { $HostName = '127.0.0.1' }
     }
     if ($Port -le 0) {
-        $Port = if ($script:OpHttpPort) { [int]$script:OpHttpPort } else { 3000 }
+        $Port = if ($script:OpHttpPort) { [int]$script:OpHttpPort } else { 80 }
     }
     $client = $null
     try {
@@ -420,12 +424,12 @@ function Test-OpTcpPortOpen {
     }
 }
 
-# Fast status for tray timer / hover — never calls WSL or HTTP
+# UI reads only the latest background sample.
 function Test-OpenProjectQuick {
-    return (Test-OpTcpPortOpen -TimeoutMs 200)
+    return ($script:OpHealthCache -and $script:OpHealthCache.State -eq 'Running')
 }
 
-function Test-OpenProjectRunning {
+function Test-OpHttpReady {
     if (-not (Test-OpTcpPortOpen -TimeoutMs 400)) {
         return $false
     }
@@ -442,6 +446,7 @@ function Test-OpenProjectRunning {
     } catch [System.Net.WebException] {
         if ($_.Exception.Response) {
             $code = [int]$_.Exception.Response.StatusCode
+            $_.Exception.Response.Close()
             return ($code -ge 200 -and $code -lt 400)
         }
         return $false
@@ -526,12 +531,17 @@ function ConvertFrom-OpWslListText {
 }
 
 function Test-WslDistroRunning {
+    param([switch]$Strict)
     try {
         $r = Invoke-WslProcess -ArgumentList @('-l', '-q', '--running') -TimeoutSec 5
-        if ($r.ExitCode -ne 0) { return $false }
+        if ($r.ExitCode -ne 0) {
+            if ($Strict) { throw "WSL list: exit=$($r.ExitCode). $($r.StdErr) $($r.StdOut)" }
+            return $false
+        }
         $names = ConvertFrom-OpWslListText -Raw $r.StdOut
         return ($names -contains $script:OpDistro)
     } catch {
+        if ($Strict) { throw }
         return $false
     }
 }
@@ -606,54 +616,87 @@ function Invoke-WslScriptChecked {
     return
 }
 
+# All package operations share the same validation and exact service namespace.
+function Invoke-OpPackageCommand {
+    param([Parameter(Mandatory)][ValidateSet('check','status','start','stop','migrate','pending','doctor','journal')][string]$Action,
+          [int]$TimeoutSec = 30)
+    $user = if ($Action -in @('start','stop','journal')) { 'root' } else { $script:OpLinuxUser }
+    $path = Escape-OpBashSingleQuotes "$($script:OpWslTrayDir)/op-tray-package.sh"
+    $root = Escape-OpBashSingleQuotes $script:OpRoot
+    # Also bound Linux children; terminating wsl.exe alone may leave a migration alive.
+    $linuxTimeout = [Math]::Max(1, $TimeoutSec - 6)
+    $cmd = "export OP_ROOT='$root'; exec timeout --kill-after=5s ${linuxTimeout}s bash '$path' '$Action'"
+    $r = Invoke-WslProcess -ArgumentList @('-d',$script:OpDistro,'-u',$user,'--','bash','-lc',$cmd) -TimeoutSec $TimeoutSec
+    if ($r.ExitCode -ne 0) {
+        $detail = ($r.StdErr + "`n" + $r.StdOut).Trim()
+        if ($detail.Length -gt 1500) { $detail = $detail.Substring($detail.Length - 1500) }
+        Write-OpActivityLog -Message "Package ${Action}: exit=$($r.ExitCode) $detail"
+        throw "OpenProject package ${Action}: exit=$($r.ExitCode). $detail"
+    }
+    return $r.StdOut.Trim()
+}
+
+function Update-OpPackagedSettings {
+    # Called only from a worker, after confirmation of the actual package installation.
+    if ([string]$script:OpSettings.Url -cnotin @('http://localhost:3000', 'http://localhost')) { return $false }
+    $null = Invoke-OpPackageCommand -Action check
+    $path = Get-OpSettingsPath $script:OpTrayDir
+    if (Test-Path -LiteralPath $path) {
+        $backup = $path + '.before-package-' + [Guid]::NewGuid().ToString('N') + '.bak'
+        Copy-Item -LiteralPath $path -Destination $backup -ErrorAction Stop
+    }
+    $next = Read-OpSettings $script:OpTrayDir
+    if ([string]$next.Url -cnotin @('http://localhost:3000', 'http://localhost')) { return $false }
+    $next.Url = 'http://127.0.0.1'
+    $next = Write-OpSettings -TrayDir $script:OpTrayDir -Settings $next
+    Initialize-OpenProjectTrayCore -TrayDir $script:OpTrayDir -Settings $next
+    Write-OpActivityLog -Message 'Настройки пакетной установки: адрес изменён на http://127.0.0.1; сохранена резервная копия.'
+    return $true
+}
+
+function Get-OpPackageHealth {
+    try {
+        # Monitoring never wakes a stopped distro.
+        if (-not (Test-WslDistroRunning -Strict)) { return @{State='Stopped'; ActiveServices=$false; Error=''} }
+        $status = Invoke-OpPackageCommand -Action status -TimeoutSec 15
+        if ($status -eq 'STOPPED') { return @{State='Stopped'; ActiveServices=$false; Error=''} }
+        if ($status -ne 'RUNNING') { return @{State='Error'; ActiveServices=$true; Error=$status} }
+        if (-not (Test-OpHttpReady)) { return @{State='Error'; ActiveServices=$true; Error="HTTP: $($script:OpLoginUrl) не готов"} }
+        return @{State='Running'; ActiveServices=$true; Error=''}
+    } catch { return @{State='Error'; ActiveServices=$false; Error=$_.Exception.Message} }
+}
+
+function Test-OpenProjectRunning { return ((Get-OpPackageHealth).State -eq 'Running') }
+
 function Start-PostgresReady {
     Ensure-WslRunning
-    [void](Invoke-WslRootChecked -BashCommand 'service postgresql start >/dev/null' -TimeoutSec 60)
-    $readyCmd = 'for i in 1 2 3 4 5 6 7 8 9 10; do pg_isready -q && exit 0; sleep 1; done; echo "pg_isready failed" >&2; exit 1'
-    [void](Invoke-WslRootChecked -BashCommand $readyCmd -TimeoutSec 30)
+    $null = Invoke-OpPackageCommand -Action check
+    Invoke-WslRootChecked -BashCommand 'service postgresql start >/dev/null && pg_isready -q' -TimeoutSec 60
 }
 
-function Start-OpenProjectDevStack {
+function Start-OpenProjectService {
     Start-PostgresReady
-    [void](Invoke-WslScriptChecked -ScriptFile 'op-tray-start.sh' -TimeoutSec 60)
+    $null = Invoke-OpPackageCommand -Action start -TimeoutSec $script:OpWslCommandTimeoutSec
 }
 
-function Stop-OpenProjectDevStack {
+function Stop-OpenProjectService {
     Ensure-WslRunning
-    [void](Invoke-WslScriptChecked -ScriptFile 'op-tray-stop.sh' -TimeoutSec 45)
+    $null = Invoke-OpPackageCommand -Action stop -TimeoutSec $script:OpWslCommandTimeoutSec
 }
 
 function Invoke-OpenProjectPrepare {
     Start-PostgresReady
-    [void](Invoke-WslScriptChecked -ScriptFile 'op-tray-prepare.sh' -TimeoutSec $script:OpPrepareTimeoutSec)
+    $null = Invoke-OpPackageCommand -Action migrate -TimeoutSec $script:OpPrepareTimeoutSec
 }
 
 function Wait-OpenProjectReady {
     param([int]$TimeoutSec = 90)
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
-    while ((Get-Date) -lt $deadline) {
-        if (Test-OpTcpPortOpen -TimeoutMs 300) {
-            if (Test-OpenProjectRunning) { return $true }
-        }
+    do {
+        if (Test-OpenProjectRunning) { return $true }
         Start-Sleep -Seconds 1
-    }
+    } while ((Get-Date) -lt $deadline)
     return $false
-}
-
-function Get-OpenProjectProcManagerCount {
-    Ensure-WslRunning
-    $cmd = "pgrep -u $($script:OpLinuxUser) -f 'foreman start -f Procfile.dev|overmind start -f Procfile.dev' 2>/dev/null | wc -l"
-    try {
-        $r = Invoke-WslProcess -ArgumentList @(
-            '-d', $script:OpDistro, '-u', $script:OpLinuxUser, '--', 'bash', '-lc', $cmd
-        ) -TimeoutSec 20
-        if ($r.ExitCode -ne 0) { return 0 }
-        $n = 0
-        [void][int]::TryParse($r.StdOut.Trim(), [ref]$n)
-        return $n
-    } catch {
-        return 0
-    }
 }
 
 function Open-OpenProjectBrowser {
@@ -682,6 +725,10 @@ function Read-OpWslTextFile {
         [int]$TailLines = 200,
         [int]$TimeoutSec = 30
     )
+    if ($LinuxPath -eq 'journal:openproject') {
+        Ensure-WslRunning
+        return (Invoke-OpPackageCommand -Action journal -TimeoutSec $TimeoutSec)
+    }
     $unc = Get-OpWslUncPath -LinuxPath $LinuxPath
     if (Test-Path -LiteralPath $unc) {
         try {
@@ -702,8 +749,8 @@ function Read-OpWslTextFile {
 
 function Open-OpWslLogInNotepad {
     param([Parameter(Mandatory)][string]$LinuxPath)
-    $unc = Get-OpWslUncPath -LinuxPath $LinuxPath
-    if (Test-Path -LiteralPath $unc) {
+    $unc = if ($LinuxPath -eq 'journal:openproject') { '' } else { Get-OpWslUncPath -LinuxPath $LinuxPath }
+    if ($unc -and (Test-Path -LiteralPath $unc)) {
         Start-Process notepad.exe -ArgumentList $unc
         return
     }
@@ -712,7 +759,7 @@ function Open-OpWslLogInNotepad {
     if (-not (Test-Path -LiteralPath $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
-    $name = [System.IO.Path]::GetFileName($LinuxPath)
+    $name = if ($LinuxPath -eq 'journal:openproject') { 'openproject-services.log' } else { [System.IO.Path]::GetFileName($LinuxPath) }
     if ([string]::IsNullOrWhiteSpace($name)) { $name = 'wsl-log.txt' }
     $tmp = Join-Path $dir ("view-" + $name)
     [System.IO.File]::WriteAllText($tmp, $text + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
@@ -724,18 +771,23 @@ function Start-OpWslLogFollow {
     Ensure-WslRunning
     $pathEsc = Escape-OpBashSingleQuotes -Value $LinuxPath
     $inner = "if [ -f '$pathEsc' ]; then echo Following: $pathEsc; tail -n 50 -f -- '$pathEsc'; else echo 'File not found: $pathEsc'; exec bash -l; fi"
+    $user = $script:OpLinuxUser
+    if ($LinuxPath -eq 'journal:openproject') {
+        $inner = "exec journalctl --no-pager -n 50 -f -u 'openproject*.service'"
+        $user = 'root'
+    }
     $wt = Get-Command wt.exe -ErrorAction SilentlyContinue
     if ($wt) {
         $arg = Join-NativeArgumentList -ArgumentList @(
-            'new-tab', '--', 'wsl.exe', '-d', $script:OpDistro, '-u', $script:OpLinuxUser, '--', 'bash', '-lc', $inner
+            'new-tab', '--', 'wsl.exe', '-d', $script:OpDistro, '-u', $user, '--', 'bash', '-lc', $inner
         )
-        Start-Process -FilePath $wt.Source -ArgumentList $arg
+        Start-Process -FilePath $wt.Source -ArgumentList $arg -WindowStyle Hidden
         return
     }
     $arg = Join-NativeArgumentList -ArgumentList @(
-        '-d', $script:OpDistro, '-u', $script:OpLinuxUser, '--', 'bash', '-lc', $inner
+        '-d', $script:OpDistro, '-u', $user, '--', 'bash', '-lc', $inner
     )
-    Start-Process -FilePath 'wsl.exe' -ArgumentList $arg
+    Start-Process -FilePath 'wsl.exe' -ArgumentList $arg -WindowStyle Hidden
 }
 
 function Open-OpProjectTerminal {
@@ -757,115 +809,28 @@ function Open-OpProjectTerminal {
 }
 
 function Invoke-OpDoctorCheck {
-    $report = New-Object System.Collections.Generic.List[string]
-    [void]$report.Add('=== OpenProject Tray doctor ===')
-    [void]$report.Add("Distro=$($script:OpDistro) User=$($script:OpLinuxUser) Root=$($script:OpRoot)")
-
     try {
         Ensure-WslRunning
-        [void]$report.Add('[OK] WSL distro reachable')
-    } catch {
-        [void]$report.Add('[FAIL] WSL: ' + $_.Exception.Message)
-        [void]$report.Add('[SUMMARY] critical checks FAILED')
-        return @{
-            Ok     = $false
-            Ready  = $true
-            Report = ($report -join "`r`n")
-            Mode   = 'Doctor'
-        }
-    }
-
-    $rootEsc = Escape-OpBashSingleQuotes -Value $script:OpRoot
-    $port = [int]$script:OpHttpPort
-    $scriptPath = "$($script:OpWslTrayDir)/op-tray-doctor.sh"
-    $pathEsc = Escape-OpBashSingleQuotes -Value $scriptPath
-
-    # One hidden bash process; never open Terminal / notepad / wt.
-    $bashCmd = "export OP_ROOT='$rootEsc'; export OP_HTTP_PORT='$port'; if [ ! -f '$pathEsc' ]; then echo '[FAIL] doctor script missing: $pathEsc' >&2; exit 2; fi; bash '$pathEsc'"
-    try {
-        $r = Invoke-WslProcess -ArgumentList @(
-            '-d', $script:OpDistro, '-u', $script:OpLinuxUser, '--', 'bash', '-lc', $bashCmd
-        ) -TimeoutSec 60
-    } catch {
-        [void]$report.Add('[FAIL] doctor invoke: ' + $_.Exception.Message)
-        [void]$report.Add('[SUMMARY] critical checks FAILED')
-        return @{
-            Ok     = $false
-            Ready  = $true
-            Report = ($report -join "`r`n")
-            Mode   = 'Doctor'
-        }
-    }
-
-    [void]$report.Add('WSL exit=' + $r.ExitCode)
-    if ($r.StdOut.Trim()) {
-        foreach ($line in ($r.StdOut -split "`r?`n")) {
-            if ($line.Trim().Length -gt 0) { [void]$report.Add($line) }
-        }
-    }
-    if ($r.StdErr.Trim()) {
-        [void]$report.Add('--- stderr ---')
-        foreach ($line in ($r.StdErr -split "`r?`n")) {
-            if ($line.Trim().Length -gt 0) { [void]$report.Add($line) }
-        }
-    }
-
-    [void]$report.Add('--- Windows TCP ---')
-    foreach ($p in @($port, 4200, 1234)) {
-        try {
-            $open = Test-OpTcpPortOpen -Port $p -TimeoutMs 200
-            $state = if ($open) { 'LISTEN' } else { 'free' }
-            [void]$report.Add("[WIN] port $p : $state")
-        } catch {
-            [void]$report.Add("[WIN] port $p : error $($_.Exception.Message)")
-        }
-    }
-
-    $ok = ($r.ExitCode -eq 0)
-    if ($ok) {
-        [void]$report.Add('[HOST] doctor finished without host errors')
-    } else {
-        [void]$report.Add('[HOST] doctor reported failures (see [FAIL] above)')
-    }
-
-    return @{
-        Ok     = $ok
-        Ready  = $true
-        Report = ($report -join "`r`n")
-        Mode   = 'Doctor'
-    }
+        $report = Invoke-OpPackageCommand -Action doctor -TimeoutSec 60
+        $health = Get-OpPackageHealth
+        return @{Ok=($health.State -ne 'Error'); Ready=$true; Mode='Doctor'; Report=($report + "`r`nHTTP/services: " + $health.State + ' ' + $health.Error)}
+    } catch { return @{Ok=$false; Ready=$true; Mode='Doctor'; Report=('[FAIL] ' + $_.Exception.Message)} }
 }
 
 function Get-OpPendingMigrationCount {
     Ensure-WslRunning
-    Start-PostgresReady
-    $rootEsc = Escape-OpBashSingleQuotes -Value $script:OpRoot
-    $cmd = "export PATH=`"`$HOME/.rbenv/shims:`$HOME/.rbenv/bin:`$PATH`"; cd '$rootEsc' || exit 2; status=`$(bin/rails db:migrate:status 2>/dev/null || bundle exec rails db:migrate:status 2>/dev/null) || { echo STATUS_FAIL; exit 4; }; printf '%s\n' `"`$status`" | grep -ciE '(^|[[:space:]])down([[:space:]]|$)' || true"
-    $r = Invoke-WslProcess -ArgumentList @(
-        '-d', $script:OpDistro, '-u', $script:OpLinuxUser, '--', 'bash', '-lc', $cmd
-    ) -TimeoutSec 120
-    $raw = ($r.StdOut + "`n" + $r.StdErr).Trim()
-    if ($r.ExitCode -ne 0 -and $raw -match 'STATUS_FAIL') {
-        throw "Не удалось проверить миграции. $raw"
-    }
-    $last = ($raw -split "`r?`n" | Where-Object { $_ -match '^\d+$' } | Select-Object -Last 1)
+    $raw = Invoke-OpPackageCommand -Action pending -TimeoutSec $script:OpPrepareTimeoutSec
     $n = 0
-    if (-not [int]::TryParse([string]$last, [ref]$n)) {
-        # grep exit 1 with no matches yields empty — treat as 0 if command otherwise ok
-        if ([string]::IsNullOrWhiteSpace($raw)) { $n = 0 }
-        else { throw "Не удалось разобрать pending count: $raw" }
-    }
-    return @{
-        Pending = $n
-        Ready   = $true
-        Mode    = 'PendingMigrate'
-        Report  = "Pending migrations: $n"
-    }
+    if (-not [int]::TryParse($raw.Trim(), [ref]$n) -or $n -lt 0) { throw "Не удалось разобрать pending count: $raw" }
+    return @{Pending=$n; Ready=$true; Mode='PendingMigrate'; Report="Pending migrations: $n"}
 }
 
 function Start-OpenProjectPipeline {
     param([switch]$OpenBrowserWhenReady)
 
+    $wasRunning = Test-WslDistroRunning
+    Ensure-WslRunning
+    $null = Update-OpPackagedSettings
     if (Test-OpenProjectRunning) {
         $script:OpLastPipelineMode = 'Fast'
         $script:OpLastFullStart = $false
@@ -873,7 +838,6 @@ function Start-OpenProjectPipeline {
         return @{ Mode = 'Fast'; FullStart = $false; Ready = $true }
     }
 
-    $wasRunning = Test-WslDistroRunning
     if ($wasRunning) {
         $script:OpLastPipelineMode = 'Warm'
         $timeout = $script:OpWarmReadyTimeoutSec
@@ -883,11 +847,11 @@ function Start-OpenProjectPipeline {
     }
 
     Ensure-WslRunning
-    Start-OpenProjectDevStack
+    Start-OpenProjectService
     $script:OpLastFullStart = $true
     $ready = Wait-OpenProjectReady -TimeoutSec $timeout
     if (-not $ready) {
-        throw "Нет ответа :$($script:OpHttpPort) за $timeout с. Лог: $(Get-OpDevLogHint)"
+        throw "Нет ответа :$($script:OpHttpPort) за $timeout с. Журнал: journalctl -u openproject*.service"
     }
     if ($OpenBrowserWhenReady) { Open-OpenProjectBrowser }
     return @{ Mode = $script:OpLastPipelineMode; FullStart = $true; Ready = $true }
@@ -898,19 +862,19 @@ function Restart-OpenProjectPipeline {
         [switch]$OpenBrowserWhenReady,
         [switch]$WithMigrate
     )
-    Stop-OpenProjectDevStack
-    Start-Sleep -Seconds 2
     Ensure-WslRunning
+    $null = Update-OpPackagedSettings
+    Stop-OpenProjectService
     if ($WithMigrate) {
         Invoke-OpenProjectPrepare
     }
-    Start-OpenProjectDevStack
+    Start-OpenProjectService
     $script:OpLastPipelineMode = if ($WithMigrate) { 'RestartMigrate' } else { 'Restart' }
     $script:OpLastFullStart = $true
     $timeout = $script:OpWarmReadyTimeoutSec
     $ready = Wait-OpenProjectReady -TimeoutSec $timeout
     if (-not $ready) {
-        throw "После рестарта нет :$($script:OpHttpPort) за $timeout с. Лог: $(Get-OpDevLogHint)"
+        throw "После рестарта нет :$($script:OpHttpPort) за $timeout с. Журнал: journalctl -u openproject*.service"
     }
     if ($OpenBrowserWhenReady) { Open-OpenProjectBrowser }
     return @{ Mode = $script:OpLastPipelineMode; FullStart = $true; Ready = $true }
